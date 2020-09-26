@@ -13,11 +13,13 @@ float atomicMaxIndex(int* address, int newCandidate, const scalar_t* image)
 {
     int* address_as_int =(int*)address;
     int old = *address_as_int, assumed;
-
+    // old here are all initialized with -1
     while (old < 0) 
     {
-        assumed = old;
-        old = atomicCAS(address_as_int, assumed, newCandidate);
+        // so here assumed === *address_as_int, then automicCAS definitely output newCandidate
+        assumed = old; 
+        // int atomicCAS(int* address, int compare, int val) computes (old == compare ? val : old),  The function returns old，应该是返回的old地址上的值。
+        old = atomicCAS(address_as_int, assumed, newCandidate); 
     }
     // old is definitely initialized and therefore a valid index. 
     // printf("Unsigned %lu \n", old);
@@ -67,7 +69,7 @@ void spx_max_pooling_forward_kernel(
     const int imHeight, 
     const int threadW, 
     const int threadH,
-    const int nClasses, 
+    const int nClasses, //channels num
     const int batchSize,
     const int K)
 {   
@@ -75,15 +77,15 @@ void spx_max_pooling_forward_kernel(
 
     int batch = blockIdx.y;
     int channel = blockIdx.x;
-    int x = threadIdx.x*threadW; 
+    int x = threadIdx.x*threadW; //平行到了像素级
     int y = threadIdx.y*threadH; 
-    int imgStartIdx = batch*nClasses*imWidth*imHeight+
-                      channel*imWidth*imHeight+
-                      y*imWidth+
+    int imgStartIdx = batch * nClasses * imWidth * imHeight + // for every batch
+                      channel * imWidth * imHeight +          // for every channel
+                      y * imWidth +                           // for every rows
                       x;
     
-    int labelStartIdx = batch*imWidth*imHeight +
-                        y*imWidth+
+    int labelStartIdx = batch * imWidth * imHeight +
+                        y * imWidth +
                         x; 
 
     if (x < imWidth && y < imHeight && channel < nClasses && batch < batchSize)
@@ -94,10 +96,10 @@ void spx_max_pooling_forward_kernel(
         int outIndex;
         // int runningIdx;
 
-        for (int idY=0; idY < threadH; idY++)
+        for (int idY=0; idY < threadH; idY++) //对每一列的每一行的每一个像素都和属于同一个超像素区域的最大的点比较
         {
-            imgIndex = imgStartIdx + idY*imWidth;
-            labelIndex = labelStartIdx + idY*imWidth;
+            imgIndex = imgStartIdx + idY * imWidth;
+            labelIndex = labelStartIdx + idY * imWidth;
             if (y+idY < imHeight)
             {
                 for (int idX=0; idX<threadW; idX++)
@@ -268,7 +270,10 @@ std::vector<at::Tensor> suppixpool_max_cuda_forward(
         output.data<scalar_t>()
         );
     }));
-    return {output, outIdx};
+    return {
+        output, 
+        outIdx
+    };
 }
 
 std::vector<at::Tensor> suppixpool_max_cuda_backward(
@@ -310,4 +315,151 @@ std::vector<at::Tensor> suppixpool_max_cuda_backward(
     }));
     return {grad_in};
     // return {grad_outputs};
+}
+
+
+
+
+// avg pool
+
+
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
+
+#else
+static __inline__ __device__ double atomicAdd(double *address, double val) {
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  unsigned long long int old = *address_as_ull, assumed;
+  if (val==0.0)
+    return __longlong_as_double(old);
+  do {
+    assumed = old;
+    old = atomicCAS(address_as_ull, assumed, __double_as_longlong(val +__longlong_as_double(assumed)));
+  } while (assumed != old);
+  return __longlong_as_double(old);
+}
+#endif
+
+
+template <typename scalar_t>
+__global__
+void spx_avg_pooling_forward_kernel(
+    const scalar_t* __restrict__ image,
+    const int* __restrict__ labels,
+    int* pool_size,
+    const int imWidth,
+    const int imHeight,
+    const int threadW,
+    const int threadH,
+    const int nClasses,
+    const int batchSize,
+    const int K,
+    scalar_t* outVals)
+{
+    // extern __shared__ int sharedMem[];
+
+    // image[batch, channel, y, x]
+    int batch = blockIdx.y;
+    int channel = blockIdx.x;
+    int x = threadIdx.x*threadW;
+    int y = threadIdx.y*threadH;
+
+    int imgStartIdx = batch*nClasses*imWidth*imHeight+
+                      channel*imWidth*imHeight+
+                      y*imWidth+
+                      x;
+    // B x C x H x W = B x 1 x H x W
+    int labelStartIdx = batch*imWidth*imHeight +
+                        y*imWidth+
+                        x;
+
+    if (x < imWidth && y < imHeight && channel < nClasses && batch < batchSize)
+    {
+        int imgIndex = imgStartIdx;
+        int labelIndex = labelStartIdx;
+
+        int label;
+        int outIndex;
+        // int runningIdx;
+        for (int idY=0; idY < threadH; idY++)
+        {
+            imgIndex = imgStartIdx + idY*imWidth;
+            labelIndex = labelStartIdx + idY*imWidth;
+            if (y+idY < imHeight)
+            {
+                for (int idX=0; idX<threadW; idX++)
+                {
+                    if (x + idX < imWidth){
+                        label = labels[labelIndex];
+                        // accumulate outVals
+                        outIndex = batch*nClasses*K + K*channel + label;
+                        // outVals[outIndex] = outVals[outIndex] + image[imgIndex];
+                        // accumulate superpixel pool size
+                        //pool_size[outIndex] = pool_size[outIndex] + 1;
+                        atomicAdd(&outVals[outIndex], double(image[imgIndex]));
+                        atomicAdd(&pool_size[outIndex], 1);
+                        imgIndex += 1;
+                        labelIndex += 1;
+                    }
+                    else{break;}
+                }
+            }else{break;}
+        }
+    }
+}
+
+
+// ---------
+// Wrappers
+// ---------
+
+// output： pooled feature
+// outIdx: original denotes max idx, saved for backward
+// avgNum: denotes spix size, saved for backward
+
+std::vector<at::Tensor> suppixpool_avg_cuda_forward(
+    at::Tensor img,
+    at::Tensor spx_labels,
+    at::Tensor output,
+    at::Tensor pool_size,
+    const int K)
+{
+    /*
+    Shape assumptions:
+    - image: [nBatch, nChannel, x, y]
+    - spx_labels: [nBatch, x, y]
+    */
+    const int batch_size = img.size(0);
+    const int channels_size = img.size(1);
+
+    const int imW = img.size(3);
+    const int imH = img.size(2);
+    // const int nPixels = img.size(2)*img.size(3);
+
+    int blockSizeX = std::min(32, imW);
+    const int threadW  = ceil(imW/(float)blockSizeX);
+
+    int blockSizeY = std::min(32, imH);
+    const int threadH    = ceil(imH/(float)blockSizeY);
+
+    // const int nbPixPerThread = ceil(nPixels/((float)blockSize));
+
+    const dim3 blocks(channels_size, batch_size);
+    const dim3 threads(blockSizeX, blockSizeY);
+
+    AT_DISPATCH_FLOATING_TYPES(img.type(), "spx_avg_pooling_forward_cuda", ([&] {
+    spx_avg_pooling_forward_kernel<scalar_t><<<blocks, threads>>>(
+        img.data<scalar_t>(),
+        spx_labels.data<int>(),
+        pool_size.data<int>(),
+        imW,
+        imH,
+        threadW,
+        threadH,
+        channels_size,
+        batch_size,
+        K,
+        output.data<scalar_t>());
+    })); // this kernel we sum each spixel, and save the number of each spixel
+    // reuse output, aveNum
+    return {output, pool_size};
 }

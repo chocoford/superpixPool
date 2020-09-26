@@ -17,6 +17,13 @@ std::vector<at::Tensor> suppixpool_max_cuda_backward(
     at::Tensor max_indices,
     const int K);
 
+std::vector<at::Tensor> suppixpool_avg_cuda_forward(
+    at::Tensor img,
+    at::Tensor spx_labels,
+    at::Tensor output,
+    at::Tensor pool_size,
+    const int K);
+
 // C++ interface
 
 #define CHECK_CUDA(x) AT_ASSERT(x.type().is_cuda()) //, #x " must be a CUDA tensor")
@@ -35,10 +42,11 @@ std::vector<at::Tensor> suppixpool_max_forward(
   const int batch_size = img.size(0);
   const int channels_size = img.size(1);
 
-  at::Tensor output = at::zeros(torch::CUDA(at::kInt), {batch_size, channels_size, K});
+  at::Tensor output = torch::zeros({batch_size, channels_size, K}, torch::CUDA(at::kInt));
   output = output.type_as(img);
   // torch::set_requires_grad(output, true);
-  at::Tensor outIdx = -at::ones(torch::CUDA(at::kInt), {batch_size, channels_size, K}); 
+  // 初始化为了-1
+  at::Tensor outIdx = -torch::ones({batch_size, channels_size, K}, torch::CUDA(at::kInt)); 
   return suppixpool_max_cuda_forward(img, spx_labels, output, outIdx, K);
   // return {output, outIdx};
   // return {img, spx_labels};
@@ -67,7 +75,33 @@ std::vector<at::Tensor> suppixpool_max_backward(
       K);
 }
 
+std::vector<at::Tensor> suppixpool_avg_forward(
+    at::Tensor img,
+    at::Tensor spx_labels,
+    const int K) {
+
+  CHECK_INPUT(img);
+  CHECK_INPUT(spx_labels);
+  // img + img; // breaks code
+
+  const int batch_size = img.size(0);
+  const int channels_size = img.size(1);
+
+  at::Tensor output = torch::zeros({batch_size, channels_size, K}, torch::CUDA(at::kInt));
+  output = output.type_as(img);
+  // torch::set_requires_grad(output, true);
+  // at::Tensor outIdx = -at::ones(torch::CUDA(at::kInt), {batch_size, channels_size, K}); // save max index of each superpixel
+  // aveNum: save the size of each superpixel
+  at::Tensor pool_size = torch::zeros({batch_size, channels_size, K}, torch::CUDA(at::kInt));
+  // std::cout << aveNum;
+  suppixpool_avg_cuda_forward(img, spx_labels, output, pool_size, K);
+  // std::cout<<aveNum;
+  return {output, pool_size};
+  // return {img, spx_labels};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("forward", &suppixpool_max_forward, "Superpixel max pooling forward (CUDA)");
-  m.def("backward", &suppixpool_max_backward, "Superpixel max pooling backward (CUDA)");
+  m.def("max_forward", &suppixpool_max_forward, "Superpixel max pooling forward (CUDA)");
+  m.def("max_backward", &suppixpool_max_backward, "Superpixel max pooling backward (CUDA)");
+  m.def("avg_forward", &suppixpool_avg_forward, "Superpixel avgpooling forward (CUDA)");
 }
