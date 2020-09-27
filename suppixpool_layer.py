@@ -5,6 +5,12 @@ import numpy as np
 class AvgSupPixPoolFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, img, spx):
+        """
+        Parameters
+        ----------
+            img: expected shape: [N, C, H, W]
+            spx: expected shape: [N, H, W]
+        """
         spx = spx.to(torch.int)
         K = spx.max()+1
         assert(spx.size()[-2:]==img.size()[-2:])
@@ -27,6 +33,11 @@ class AvgSupPixPool(torch.nn.Module):
 
     def forward(self, img, spx):
         return AvgSupPixPoolFunction.apply(img, spx)
+    
+    def get_adjacent_matrix(self, spx):
+        spx = spx.to(torch.int)
+        K = spx.max()+1
+        return spx_gpu.get_adjacent_matrix(spx, K)
 
 class MaxSupPixPoolFunction(torch.autograd.Function):
     @staticmethod 
@@ -63,6 +74,11 @@ class MaxSupPixPool(torch.nn.Module):
 
     def forward(self, img, spx):
         return MaxSupPixPoolFunction.apply(img, spx)
+
+    def get_adjacent_matrix(self, spx):
+        spx = spx.to(torch.int)
+        K = spx.max()+1
+        return spx_gpu.get_adjacent_matrix(spx, K)
 
 class SupPixUnpool(torch.nn.Module):
     def __init__(self):

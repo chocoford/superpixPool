@@ -16,7 +16,7 @@ float atomicMaxIndex(int* address, int newCandidate, const scalar_t* image)
     // old here are all initialized with -1
     while (old < 0) 
     {
-        // so here assumed === *address_as_int, then automicCAS definitely output newCandidate
+        // so here assumed === *address_as_int, then atomicCAS definitely output newCandidate
         assumed = old; 
         // int atomicCAS(int* address, int compare, int val) computes (old == compare ? val : old),  The function returns old，应该是返回的old地址上的值。
         old = atomicCAS(address_as_int, assumed, newCandidate); 
@@ -371,7 +371,7 @@ void spx_avg_pooling_forward_kernel(
     int labelStartIdx = batch*imWidth*imHeight +
                         y*imWidth+
                         x;
-
+    // 这一部分是串行的，每一个线程负责一个区域
     if (x < imWidth && y < imHeight && channel < nClasses && batch < batchSize)
     {
         int imgIndex = imgStartIdx;
@@ -462,4 +462,136 @@ std::vector<at::Tensor> suppixpool_avg_cuda_forward(
     })); // this kernel we sum each spixel, and save the number of each spixel
     // reuse output, aveNum
     return {output, pool_size};
+}
+
+
+//get_adjacent_matrix_cuda
+
+template <typename scalar_t>
+__global__
+void get_adjacent_matrix_kernel(
+    const int* __restrict__ labels,
+    const int imWidth,
+    const int imHeight,
+    const int threadW,
+    const int threadH,
+    const int batchSize,
+    const int K,
+    scalar_t* outVals)
+{
+    // extern __shared__ int sharedMem[];
+
+    // spx[batch, y, x]
+    int batch = blockIdx.x;
+    int x = threadIdx.x*threadW;
+    int y = threadIdx.y*threadH;
+
+    // B x C x H x W = B x 1 x H x W
+    int labelStartIdx = batch * imWidth * imHeight +
+                        y * imWidth +
+                        x;
+    
+    if (x < imWidth && y < imHeight && batch < batchSize)
+    {
+        int labelIndex = labelStartIdx;
+
+        int label;
+        int outIndex_up;
+        int outIndex_left;
+        int outIndex_right;
+        int outIndex_down;
+        int outIndex_self;
+        int lalel_upon_label;
+        int lalel_before_label;
+        int lalel_under_label;
+        int lalel_after_label;
+        // int runningIdx;
+        for (int idY=0; idY < threadH; idY++)
+        {
+            labelIndex = labelStartIdx + idY*imWidth;
+            if (y+idY < imHeight)
+            {
+                for (int idX=0; idX<threadW; idX++)
+                {
+                    if (x + idX < imWidth){
+                        label = labels[labelIndex];
+
+                        outIndex_self = batch * K * K + label * K + label;
+                        if (x + idX > 0){
+                            lalel_before_label = labels[labelIndex - 1];
+                            outIndex_left = batch * K * K + label * K + lalel_before_label;
+                            outVals[outIndex_left] = 1;
+                        }
+                        if (y + idY > 0) {
+                            lalel_upon_label = labels[labelIndex - imWidth];
+                            outIndex_up = batch * K * K + label * K + lalel_upon_label;
+                            outVals[outIndex_up] = 1;
+                        }
+                        if (x + idX < imWidth - 1) {
+                            lalel_after_label = labels[labelIndex + 1];
+                            outIndex_right = batch * K * K + label * K + lalel_after_label;
+                            outVals[outIndex_right] = 1;
+                        }
+                        if (y+idY < imHeight - 1) {
+                            lalel_under_label = labels[labelIndex + imWidth];    
+                            outIndex_down = batch * K * K + label * K + lalel_under_label;
+                            outVals[outIndex_down] = 1;
+                        }
+                        outVals[outIndex_self] = 1;
+                        labelIndex += 1;
+                    }
+                    else{break;}
+                }
+            }else{break;}
+        }
+    }
+}
+
+
+// ---------
+// Wrappers
+// ---------
+
+// output： pooled feature
+
+at::Tensor get_adjacent_matrix_cuda(
+    at::Tensor spx_labels,
+    at::Tensor output,
+    const int K)
+{
+    /*
+    Shape assumptions:
+    - spx_labels: [nBatch, x, y]
+    */
+    const int batch_size = spx_labels.size(0);
+
+    const int imW = spx_labels.size(2);
+    const int imH = spx_labels.size(1);
+    // const int nPixels = img.size(2)*img.size(3);
+
+    int blockSizeX = std::min(32, imW);
+    const int threadW  = ceil(imW/(float)blockSizeX);
+
+    int blockSizeY = std::min(32, imH);
+    const int threadH    = ceil(imH/(float)blockSizeY);
+
+    // const int nbPixPerThread = ceil(nPixels/((float)blockSize));
+
+    const dim3 blocks(batch_size);
+    const dim3 threads(blockSizeX, blockSizeY);
+
+    // AT_DISPATCH_ALL_TYPES(spx_labels.type(), "get_adjacent_matrix_cuda", ([&] {
+        
+    // })); // this kernel we sum each spixel, and save the number of each spixel
+    get_adjacent_matrix_kernel<<<blocks, threads>>>(
+        spx_labels.data<int>(),
+        imW,
+        imH,
+        threadW,
+        threadH,
+        batch_size,
+        K,
+        output.data<int>());
+    // reuse output, aveNum
+    return output;
 }
