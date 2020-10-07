@@ -113,7 +113,6 @@ at::Tensor get_adjacent_matrix(
   CHECK_INPUT(spx_labels);
 
   const int batch_size = spx_labels.size(0);
-  const int channels_size = spx_labels.size(1);
 
   at::Tensor output = torch::zeros({batch_size, K, K}, torch::CUDA(at::kInt));
   output = output.type_as(spx_labels);
