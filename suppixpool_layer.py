@@ -16,7 +16,7 @@ class AvgSupPixPoolFunction(torch.autograd.Function):
         assert(spx.size()[-2:]==img.size()[-2:])
         out = spx_gpu.avg_forward(img, spx, K)
         outputs, pool_size = out
-        outputs /= pool_size.to(torch.float)
+        outputs /= pool_size.to(torch.float) + 1e-10
         ctx.save_for_backward(pool_size, img, spx, K)
         return outputs
 
